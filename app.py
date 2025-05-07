@@ -1,9 +1,9 @@
+import time
+import json
 import os
 import cv2
-import time
-from flask import Flask, Response, render_template, jsonify, request, redirect, url_for
+from flask import Flask, Response, render_template, request, redirect, url_for
 from werkzeug.utils import secure_filename
-import json
 
 app = Flask(__name__)
 
@@ -13,56 +13,71 @@ STREAMS_DIR = './streams'
 # Secret password for upload page
 UPLOAD_PASSWORD = 'your_secure_password'
 
-# Helper function to load metadata from stream's metadata.json
 def load_metadata(stream_name):
+    """
+    Loads metadata for a given stream from the 'metadata.json' file.
+
+    Args:
+        stream_name (str): The name of the stream.
+
+    Returns:
+        dict: The parsed metadata from the JSON file, or None if the file is not found.
+    """
     metadata_path = os.path.join(STREAMS_DIR, stream_name, 'metadata.json')
     try:
         with open(metadata_path, 'r') as file:
             return json.load(file)
     except FileNotFoundError:
         return None
+    except json.JSONDecodeError:
+        return None
 
-# Function to get the current video queue
 def get_video_queue(stream_name):
+    """
+    Retrieves the current video queue by listing the video files in the stream's 'videos' folder.
+    
+    Args:
+        stream_name (str): The name of the stream.
+
+    Returns:
+        list: A list of video filenames in the correct order for playback.
+    """
     video_dir = os.path.join(STREAMS_DIR, stream_name, 'videos')
     history_dir = os.path.join(STREAMS_DIR, stream_name, 'history')
     
-    # Get all video files from 'videos' directory
     videos = sorted([f for f in os.listdir(video_dir) if f.endswith('.mp4')], reverse=False)
-    
-    # Get history videos (if any, to prevent playing already played videos)
     history = set(os.listdir(history_dir))
 
-    # Remove videos already in history from the video queue
-    video_queue = [v for v in videos if v not in history]
-    
-    return video_queue
+    return [v for v in videos if v not in history]
 
-# Stream video function
 def generate_mjpeg_stream(stream_name):
+    """
+    Generates an MJPEG stream from the videos in the given stream's video queue.
+
+    Args:
+        stream_name (str): The name of the stream.
+
+    Yields:
+        bytes: JPEG frames in MJPEG format.
+    """
     while True:
         video_queue = get_video_queue(stream_name)
 
-        # If there are videos left in the queue, play the next one
         if video_queue:
             video_path = os.path.join(STREAMS_DIR, stream_name, 'videos', video_queue.pop(0))
             cap = cv2.VideoCapture(video_path)
-
-            # Get the frames per second (fps) from the video
             fps = cap.get(cv2.CAP_PROP_FPS)
             prev_time = time.time()
 
             while cap.isOpened():
                 ret, frame = cap.read()
                 if not ret:
-                    break  # Video ended, move to next video in queue
+                    break
 
-                # Calculate delta time
                 current_time = time.time()
                 delta_time = current_time - prev_time
                 prev_time = current_time
 
-                # Wait to maintain the correct frame rate using delta time
                 if delta_time < (1 / fps):
                     time.sleep((1 / fps) - delta_time)
 
@@ -70,34 +85,27 @@ def generate_mjpeg_stream(stream_name):
                 if not _:
                     continue
 
-                # Yield the JPEG image as MJPEG stream
                 yield (b'--frame\r\n'
                        b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
 
-            # After finishing video, move it to history
             cap.release()
             history_dir = os.path.join(STREAMS_DIR, stream_name, 'history')
             os.rename(video_path, os.path.join(history_dir, os.path.basename(video_path)))
 
-        # If no videos left in the queue, stream the offline video
         offline_video_path = os.path.join(STREAMS_DIR, stream_name, 'offline.mp4')
         cap = cv2.VideoCapture(offline_video_path)
-
-        # Get the frames per second (fps) from the offline video
         fps = cap.get(cv2.CAP_PROP_FPS)
         prev_time = time.time()
 
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
-                break  # Video ended, immediately move to the next video or offline.mp4
+                break
 
-            # Calculate delta time
             current_time = time.time()
             delta_time = current_time - prev_time
             prev_time = current_time
 
-            # Wait to maintain the correct frame rate using delta time
             if delta_time < (1 / fps):
                 time.sleep((1 / fps) - delta_time)
 
@@ -110,56 +118,74 @@ def generate_mjpeg_stream(stream_name):
 
         cap.release()
 
-        # Once offline.mp4 finishes, immediately check the queue and start the next video
-        # We call the function again, so it starts fresh with the new video queue
-        video_queue = get_video_queue(stream_name)
-
-        # Make sure to only move to offline video if there are no other videos in the queue
         if not video_queue:
             continue
-        else:
-            # If there are videos in the queue, we immediately play the next video
-            continue
 
-# Video feed route
 @app.route('/<stream_name>/video_feed')
 def video_feed(stream_name):
+    """
+    Route that serves the MJPEG stream for a specific stream.
+
+    Args:
+        stream_name (str): The name of the stream.
+
+    Returns:
+        Response: An MJPEG stream response.
+    """
     return Response(generate_mjpeg_stream(stream_name),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
 
-# Stream page route
 @app.route('/<stream_name>')
 def stream_page(stream_name):
+    """
+    Route for displaying the stream page, with metadata.
+
+    Args:
+        stream_name (str): The name of the stream.
+
+    Returns:
+        render_template: The stream page with metadata.
+    """
     metadata = load_metadata(stream_name)
     stream_title = metadata["name"] if metadata else stream_name
     return render_template('stream_page.html', stream_name=stream_name, stream_title=stream_title)
 
-# Homepage route (list all streams)
 @app.route('/')
 def index():
+    """
+    Route for the homepage, listing all available streams.
+
+    Returns:
+        render_template: The homepage with a list of streams and metadata.
+    """
     streams = [d for d in os.listdir(STREAMS_DIR) if os.path.isdir(os.path.join(STREAMS_DIR, d))]
     
-    # Load the metadata for each stream and add it to a dictionary
     stream_metadata = {}
     for stream in streams:
         metadata = load_metadata(stream)
         if metadata:
             stream_metadata[stream] = metadata["name"]
         else:
-            stream_metadata[stream] = stream  # Use the stream folder name if no metadata is available
+            stream_metadata[stream] = stream
 
     return render_template('index.html', stream_metadata=stream_metadata)
 
-# Upload route
 @app.route('/<stream_name>/upload', methods=['GET', 'POST'])
 def upload(stream_name):
+    """
+    Route for handling file uploads to a specific stream.
+
+    Args:
+        stream_name (str): The name of the stream.
+
+    Returns:
+        str: A message indicating success or failure.
+    """
     if request.method == 'POST':
-        # Password check
         password = request.form.get('password')
         if password != UPLOAD_PASSWORD:
             return "Invalid password!", 403
 
-        # Get the uploaded file
         file = request.files.get('file')
         if file and file.filename.endswith('.mp4'):
             filename = secure_filename(file.filename)
