@@ -1,165 +1,82 @@
 import os
-import json
+import time
 import cv2
-from flask import Flask, Response, send_file, render_template_string, request, redirect, url_for
-from werkzeug.utils import secure_filename
+import json
+from flask import Flask, Response, render_template, abort
 
 app = Flask(__name__)
-app.config['UPLOAD_PASSWORD'] = 'changeme'  # Change this to a secure password
 
-BASE_DIR = './streams'
+# Configuration
+BASE_STREAMS_DIR = "./streams"
+OFFLINE_VIDEO = "offline.mp4"
 
-TEMPLATE_INDEX = '''
-<!DOCTYPE html>
-<html>
-<head>
-  <title>Streams</title>
-  <style>
-    body { font-family: sans-serif; margin: 2em; }
-  </style>
-</head>
-<body>
-<h1>Available Streams</h1>
-<ul>
-{% for stream in streams %}
-  <li><a href="/{{ stream }}">{{ metadata[stream] }}</a> - {{ 'Online' if online[stream] else 'Offline' }}</li>
-{% endfor %}
-</ul>
-<a href="/upload">Upload a Video (Admin)</a>
-</body>
-</html>
-'''
+# Load metadata
+def load_metadata(stream_name):
+    metadata_file = os.path.join(BASE_STREAMS_DIR, stream_name, "metadata.json")
+    if not os.path.exists(metadata_file):
+        return None
+    with open(metadata_file, "r") as file:
+        return json.load(file)
 
-TEMPLATE_STREAM = '''
-<!DOCTYPE html>
-<html>
-<head>
-  <title>{{ stream_title }}</title>
-  <style>
-    html, body { margin: 0; padding: 0; height: 100%; }
-    img { width: 100%; height: 100%; object-fit: contain; }
-  </style>
-</head>
-<body>
-<img src="/{{ stream_name }}/mjpeg">
-</body>
-</html>
-'''
+# Get video files in the directory
+def get_video_files(stream_name):
+    video_dir = os.path.join(BASE_STREAMS_DIR, stream_name, "videos")
+    return [f for f in os.listdir(video_dir) if f.endswith(('.mp4', '.avi', '.mov'))]
 
-TEMPLATE_UPLOAD = '''
-<!DOCTYPE html>
-<html>
-<head>
-  <title>Upload Video</title>
-  <style>
-    body { font-family: sans-serif; margin: 2em; }
-  </style>
-</head>
-<body>
-<h1>Upload a Video</h1>
-<form method="POST" enctype="multipart/form-data">
-  Password: <input type="password" name="password"><br><br>
-  Stream:
-  <select name="stream">
-    {% for stream in streams %}
-    <option value="{{ stream }}">{{ metadata[stream] }}</option>
-    {% endfor %}
-  </select><br><br>
-  File: <input type="file" name="file"><br><br>
-  <input type="submit" value="Upload">
-</form>
-</body>
-</html>
-'''
+# Stream MJPEG video
+def generate_mjpeg_stream(stream_name):
+    video_files = get_video_files(stream_name)
+    if not video_files:
+        video_path = os.path.join(BASE_STREAMS_DIR, stream_name, OFFLINE_VIDEO)
+    else:
+        video_path = os.path.join(BASE_STREAMS_DIR, stream_name, "videos", video_files[0])  # Pick the first video
+    
+    print(f"Streaming video: {video_path}")
 
-def get_streams():
-    return [s for s in os.listdir(BASE_DIR) if os.path.isdir(os.path.join(BASE_DIR, s))]
+    cap = cv2.VideoCapture(video_path)
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            # Move the video to history and remove it from the video folder
+            filename = os.path.basename(video_path)
+            video_history_path = os.path.join(BASE_STREAMS_DIR, stream_name, "history", filename)
+            os.rename(video_path, video_history_path)
 
-def get_next_video_path(stream_path):
-    video_dir = os.path.join(stream_path, 'videos')
-    files = sorted(os.listdir(video_dir))
-    return os.path.join(video_dir, files[0]) if files else None
+            # Check if there are videos left to play
+            video_files = get_video_files(stream_name)
+            if video_files:
+                video_path = os.path.join(BASE_STREAMS_DIR, stream_name, "videos", video_files[0])
+                cap = cv2.VideoCapture(video_path)
+            else:
+                # No more videos, stream offline video
+                video_path = os.path.join(BASE_STREAMS_DIR, stream_name, OFFLINE_VIDEO)
+                cap = cv2.VideoCapture(video_path)
 
-def move_to_history(stream_path, video_file):
-    history_dir = os.path.join(stream_path, 'history')
-    os.makedirs(history_dir, exist_ok=True)
-    os.rename(video_file, os.path.join(history_dir, os.path.basename(video_file)))
-
-def load_metadata():
-    meta = {}
-    for s in get_streams():
-        path = os.path.join(BASE_DIR, s, 'metadata.json')
-        try:
-            with open(path) as f:
-                data = json.load(f)
-                meta[s] = data.get('name', s)
-        except:
-            meta[s] = s
-    return meta
+        # Encode the frame as MJPEG
+        _, jpeg = cv2.imencode('.jpg', frame)
+        if jpeg is not None:
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n\r\n')
+        time.sleep(0.1)
 
 @app.route('/')
 def index():
-    streams = get_streams()
-    online = {}
-    for s in streams:
-        path = os.path.join(BASE_DIR, s, 'videos')
-        online[s] = bool(os.listdir(path))
-    metadata = load_metadata()
-    return render_template_string(TEMPLATE_INDEX, streams=streams, online=online, metadata=metadata)
+    streams = [d for d in os.listdir(BASE_STREAMS_DIR) if os.path.isdir(os.path.join(BASE_STREAMS_DIR, d))]
+    return render_template('index.html', streams=streams)
 
 @app.route('/<stream_name>')
 def stream_page(stream_name):
-    metadata_path = os.path.join(BASE_DIR, stream_name, 'metadata.json')
-    stream_title = stream_name
-    if os.path.exists(metadata_path):
-        with open(metadata_path) as f:
-            meta = json.load(f)
-            stream_title = meta.get('name', stream_name)
-    return render_template_string(TEMPLATE_STREAM, stream_name=stream_name, stream_title=stream_title)
+    metadata = load_metadata(stream_name)
+    if not metadata:
+        abort(404, description="Stream not found.")
+    return render_template('stream_page.html', stream_name=stream_name, stream_title=metadata["name"])
 
-@app.route('/<stream_name>/mjpeg')
-def mjpeg_stream(stream_name):
-    stream_path = os.path.join(BASE_DIR, stream_name)
-    next_video = get_next_video_path(stream_path)
-
-    if not next_video:
-        return "Stream offline", 404
-
-    cap = cv2.VideoCapture(next_video)
-
-    def generate():
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
-            ret, jpeg = cv2.imencode('.jpg', frame)
-            if not ret:
-                continue
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
-        cap.release()
-        move_to_history(stream_path, next_video)
-
-    return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
-
-@app.route('/upload', methods=['GET', 'POST'])
-def upload():
-    streams = get_streams()
-    metadata = load_metadata()
-    if request.method == 'POST':
-        password = request.form.get('password')
-        if password != app.config['UPLOAD_PASSWORD']:
-            return "Unauthorized", 403
-
-        stream = request.form.get('stream')
-        file = request.files['file']
-        if stream and file:
-            filename = secure_filename(file.filename)
-            save_path = os.path.join(BASE_DIR, stream, 'videos', filename)
-            file.save(save_path)
-            return redirect(url_for('index'))
-
-    return render_template_string(TEMPLATE_UPLOAD, streams=streams, metadata=metadata)
+@app.route('/<stream_name>/video_feed')
+def video_feed(stream_name):
+    if not os.path.exists(os.path.join(BASE_STREAMS_DIR, stream_name)):
+        abort(404, description="Stream not found.")
+    return Response(generate_mjpeg_stream(stream_name),
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0', port=5000)
