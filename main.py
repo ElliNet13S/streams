@@ -113,6 +113,9 @@ def generate_mjpeg_stream(stream_name):
         # Make sure to only move to offline video if there are no other videos in the queue
         if not video_queue:
             continue
+        else:
+            # If there are videos in the queue, we immediately play the next video
+            continue
 
 # Video feed route
 @app.route('/<stream_name>/video_feed')
@@ -131,7 +134,18 @@ def stream_page(stream_name):
 @app.route('/')
 def index():
     streams = [d for d in os.listdir(STREAMS_DIR) if os.path.isdir(os.path.join(STREAMS_DIR, d))]
-    return render_template('index.html', streams=streams)
+    
+    # Load the metadata for each stream and add it to a dictionary
+    stream_metadata = {}
+    for stream in streams:
+        metadata = load_metadata(stream)
+        if metadata:
+            stream_metadata[stream] = metadata["name"]
+        else:
+            stream_metadata[stream] = stream  # Use the stream folder name if no metadata is available
+
+    return render_template('index.html', stream_metadata=stream_metadata)
+
 
 if __name__ == "__main__":
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(debug=False, host='0.0.0.0', port=5000)
