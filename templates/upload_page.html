@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Upload Video</title>
+</head>
+<body>
+    <h1>Upload Video for {{ stream_name }}</h1>
+    <form action="{{ url_for('upload', stream_name=stream_name) }}" method="post" enctype="multipart/form-data">
+        <label for="password">Password:</label>
+        <input type="password" id="password" name="password" required><br><br>
+        
+        <label for="file">Choose Video:</label>
+        <input type="file" id="file" name="file" accept=".mp4" required><br><br>
+
+        <input type="submit" value="Upload">
+    </form>
+</body>
+</html>

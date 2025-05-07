@@ -1,13 +1,17 @@
 import os
 import cv2
 import time
-from flask import Flask, Response, render_template, jsonify
+from flask import Flask, Response, render_template, jsonify, request, redirect, url_for
+from werkzeug.utils import secure_filename
 import json
 
 app = Flask(__name__)
 
 # Path to streams
 STREAMS_DIR = './streams'
+
+# Secret password for upload page
+UPLOAD_PASSWORD = 'your_secure_password'
 
 # Helper function to load metadata from stream's metadata.json
 def load_metadata(stream_name):
@@ -146,6 +150,26 @@ def index():
 
     return render_template('index.html', stream_metadata=stream_metadata)
 
+# Upload route
+@app.route('/<stream_name>/upload', methods=['GET', 'POST'])
+def upload(stream_name):
+    if request.method == 'POST':
+        # Password check
+        password = request.form.get('password')
+        if password != UPLOAD_PASSWORD:
+            return "Invalid password!", 403
+
+        # Get the uploaded file
+        file = request.files.get('file')
+        if file and file.filename.endswith('.mp4'):
+            filename = secure_filename(file.filename)
+            upload_path = os.path.join(STREAMS_DIR, stream_name, 'videos', filename)
+            file.save(upload_path)
+            return redirect(url_for('stream_page', stream_name=stream_name))
+        else:
+            return "Invalid file format. Only .mp4 files are allowed.", 400
+
+    return render_template('upload_page.html', stream_name=stream_name)
 
 if __name__ == "__main__":
     app.run(debug=False, host='0.0.0.0', port=5000)
