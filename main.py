@@ -1,82 +1,137 @@
 import os
-import time
 import cv2
+import time
+from flask import Flask, Response, render_template, jsonify
 import json
-from flask import Flask, Response, render_template, abort
 
 app = Flask(__name__)
 
-# Configuration
-BASE_STREAMS_DIR = "./streams"
-OFFLINE_VIDEO = "offline.mp4"
+# Path to streams
+STREAMS_DIR = './streams'
 
-# Load metadata
+# Helper function to load metadata from stream's metadata.json
 def load_metadata(stream_name):
-    metadata_file = os.path.join(BASE_STREAMS_DIR, stream_name, "metadata.json")
-    if not os.path.exists(metadata_file):
+    metadata_path = os.path.join(STREAMS_DIR, stream_name, 'metadata.json')
+    try:
+        with open(metadata_path, 'r') as file:
+            return json.load(file)
+    except FileNotFoundError:
         return None
-    with open(metadata_file, "r") as file:
-        return json.load(file)
 
-# Get video files in the directory
-def get_video_files(stream_name):
-    video_dir = os.path.join(BASE_STREAMS_DIR, stream_name, "videos")
-    return [f for f in os.listdir(video_dir) if f.endswith(('.mp4', '.avi', '.mov'))]
-
-# Stream MJPEG video
-def generate_mjpeg_stream(stream_name):
-    video_files = get_video_files(stream_name)
-    if not video_files:
-        video_path = os.path.join(BASE_STREAMS_DIR, stream_name, OFFLINE_VIDEO)
-    else:
-        video_path = os.path.join(BASE_STREAMS_DIR, stream_name, "videos", video_files[0])  # Pick the first video
+# Function to get the current video queue
+def get_video_queue(stream_name):
+    video_dir = os.path.join(STREAMS_DIR, stream_name, 'videos')
+    history_dir = os.path.join(STREAMS_DIR, stream_name, 'history')
     
-    print(f"Streaming video: {video_path}")
+    # Get all video files from 'videos' directory
+    videos = sorted([f for f in os.listdir(video_dir) if f.endswith('.mp4')], reverse=False)
+    
+    # Get history videos (if any, to prevent playing already played videos)
+    history = set(os.listdir(history_dir))
 
-    cap = cv2.VideoCapture(video_path)
+    # Remove videos already in history from the video queue
+    video_queue = [v for v in videos if v not in history]
+    
+    return video_queue
+
+# Stream video function
+def generate_mjpeg_stream(stream_name):
     while True:
-        ret, frame = cap.read()
-        if not ret:
-            # Move the video to history and remove it from the video folder
-            filename = os.path.basename(video_path)
-            video_history_path = os.path.join(BASE_STREAMS_DIR, stream_name, "history", filename)
-            os.rename(video_path, video_history_path)
+        video_queue = get_video_queue(stream_name)
 
-            # Check if there are videos left to play
-            video_files = get_video_files(stream_name)
-            if video_files:
-                video_path = os.path.join(BASE_STREAMS_DIR, stream_name, "videos", video_files[0])
-                cap = cv2.VideoCapture(video_path)
-            else:
-                # No more videos, stream offline video
-                video_path = os.path.join(BASE_STREAMS_DIR, stream_name, OFFLINE_VIDEO)
-                cap = cv2.VideoCapture(video_path)
+        # If there are videos left in the queue, play the next one
+        if video_queue:
+            video_path = os.path.join(STREAMS_DIR, stream_name, 'videos', video_queue.pop(0))
+            cap = cv2.VideoCapture(video_path)
 
-        # Encode the frame as MJPEG
-        _, jpeg = cv2.imencode('.jpg', frame)
-        if jpeg is not None:
+            # Get the frames per second (fps) from the video
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            prev_time = time.time()
+
+            while cap.isOpened():
+                ret, frame = cap.read()
+                if not ret:
+                    break  # Video ended, move to next video in queue
+
+                # Calculate delta time
+                current_time = time.time()
+                delta_time = current_time - prev_time
+                prev_time = current_time
+
+                # Wait to maintain the correct frame rate using delta time
+                if delta_time < (1 / fps):
+                    time.sleep((1 / fps) - delta_time)
+
+                _, jpeg = cv2.imencode('.jpg', frame)
+                if not _:
+                    continue
+
+                # Yield the JPEG image as MJPEG stream
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
+
+            # After finishing video, move it to history
+            cap.release()
+            history_dir = os.path.join(STREAMS_DIR, stream_name, 'history')
+            os.rename(video_path, os.path.join(history_dir, os.path.basename(video_path)))
+
+        # If no videos left in the queue, stream the offline video
+        offline_video_path = os.path.join(STREAMS_DIR, stream_name, 'offline.mp4')
+        cap = cv2.VideoCapture(offline_video_path)
+
+        # Get the frames per second (fps) from the offline video
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        prev_time = time.time()
+
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break  # Video ended, immediately move to the next video or offline.mp4
+
+            # Calculate delta time
+            current_time = time.time()
+            delta_time = current_time - prev_time
+            prev_time = current_time
+
+            # Wait to maintain the correct frame rate using delta time
+            if delta_time < (1 / fps):
+                time.sleep((1 / fps) - delta_time)
+
+            _, jpeg = cv2.imencode('.jpg', frame)
+            if not _:
+                continue
+
             yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n\r\n')
-        time.sleep(0.1)
+                   b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
 
-@app.route('/')
-def index():
-    streams = [d for d in os.listdir(BASE_STREAMS_DIR) if os.path.isdir(os.path.join(BASE_STREAMS_DIR, d))]
-    return render_template('index.html', streams=streams)
+        cap.release()
 
-@app.route('/<stream_name>')
-def stream_page(stream_name):
-    metadata = load_metadata(stream_name)
-    if not metadata:
-        abort(404, description="Stream not found.")
-    return render_template('stream_page.html', stream_name=stream_name, stream_title=metadata["name"])
+        # Once offline.mp4 finishes, immediately check the queue and start the next video
+        # We call the function again, so it starts fresh with the new video queue
+        video_queue = get_video_queue(stream_name)
 
+        # Make sure to only move to offline video if there are no other videos in the queue
+        if not video_queue:
+            continue
+
+# Video feed route
 @app.route('/<stream_name>/video_feed')
 def video_feed(stream_name):
-    if not os.path.exists(os.path.join(BASE_STREAMS_DIR, stream_name)):
-        abort(404, description="Stream not found.")
     return Response(generate_mjpeg_stream(stream_name),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+# Stream page route
+@app.route('/<stream_name>')
+def stream_page(stream_name):
+    metadata = load_metadata(stream_name)
+    stream_title = metadata["name"] if metadata else stream_name
+    return render_template('stream_page.html', stream_name=stream_name, stream_title=stream_title)
+
+# Homepage route (list all streams)
+@app.route('/')
+def index():
+    streams = [d for d in os.listdir(STREAMS_DIR) if os.path.isdir(os.path.join(STREAMS_DIR, d))]
+    return render_template('index.html', streams=streams)
+
+if __name__ == "__main__":
+    app.run(debug=True, host='0.0.0.0', port=5000)
