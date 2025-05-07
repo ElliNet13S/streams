@@ -1,3 +1,8 @@
+"""
+This is a Flask application that streams video content for multiple streams.
+It handles video queueing, metadata loading, and video uploads.
+"""
+
 import time
 import json
 import os
@@ -25,7 +30,7 @@ def load_metadata(stream_name):
     """
     metadata_path = os.path.join(STREAMS_DIR, stream_name, 'metadata.json')
     try:
-        with open(metadata_path, 'r') as file:
+        with open(metadata_path, 'r', encoding='utf-8') as file:
             return json.load(file)
     except FileNotFoundError:
         return None
@@ -192,8 +197,8 @@ def upload(stream_name):
             upload_path = os.path.join(STREAMS_DIR, stream_name, 'videos', filename)
             file.save(upload_path)
             return redirect(url_for('stream_page', stream_name=stream_name))
-        else:
-            return "Invalid file format. Only .mp4 files are allowed.", 400
+
+        return "Invalid file format. Only .mp4 files are allowed.", 400
 
     return render_template('upload_page.html', stream_name=stream_name)
 
