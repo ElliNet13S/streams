@@ -1,22 +1,20 @@
-"""
-This is a Flask application that streams video content for multiple streams.
-It handles video queueing, metadata loading, and video uploads.
-"""
-
 import time
 import json
 import os
 import cv2
 from flask import Flask, Response, render_template, request, redirect, url_for
-from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
 
 # Path to streams
 STREAMS_DIR = './streams'
 
-# Secret password for upload page
-UPLOAD_PASSWORD = 'your_secure_password'
+# Get secret password from environment variable
+UPLOAD_PASSWORD = os.getenv('UPLOAD_PASSWORD')
+
+# Check if the password is set, and if not, show a warning message.
+if not UPLOAD_PASSWORD:
+    print("WARNING: UPLOAD_PASSWORD is not set. File uploads are disabled.")
 
 def load_metadata(stream_name):
     """
@@ -186,6 +184,9 @@ def upload(stream_name):
     Returns:
         str: A message indicating success or failure.
     """
+    if not UPLOAD_PASSWORD:
+        return "UPLOAD_PASSWORD environment variable is not set. Uploads are disabled.", 403
+
     if request.method == 'POST':
         password = request.form.get('password')
         if password != UPLOAD_PASSWORD:
