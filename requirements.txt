@@ -4,4 +4,4 @@ werkzeug
 gevent>=1.4
 gunicorn
 
-# Use gunicorn app:app --bind 0.0.0.0:5000 --worker-class gevent --timeout 0
+# gunicorn app:app --bind 0.0.0.0:5000 --worker-class gevent --timeout 0

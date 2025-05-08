@@ -55,15 +55,32 @@ def generate_mjpeg_stream(stream_name):
                 video_path = os.path.join(STREAMS_DIR, stream_name, 'videos', video_queue.pop(0))
                 for frame in frame_stream(video_path, stop_event):
                     yield frame
-                # Move file to history
                 history_dir = os.path.join(STREAMS_DIR, stream_name, 'history')
                 os.rename(video_path, os.path.join(history_dir, os.path.basename(video_path)))
             else:
                 offline_path = os.path.join(STREAMS_DIR, stream_name, 'offline.mp4')
-                for frame in frame_stream(offline_path, stop_event):
-                    yield frame
+                cap = cv2.VideoCapture(offline_path)
+                fps = cap.get(cv2.CAP_PROP_FPS)
+                frame_interval = 1.0 / fps if fps > 0 else 1.0 / 30
+
+                while cap.isOpened():
+                    if get_video_queue(stream_name):
+                        break  # Exit offline early if a new video appears
+
+                    ret, frame = cap.read()
+                    if not ret:
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)  # Loop offline.mp4
+                        continue
+                    _, jpeg = cv2.imencode('.jpg', frame)
+                    if not _:
+                        continue
+                    yield (b'--frame\r\n'
+                           b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
+                    time.sleep(frame_interval)
+                cap.release()
     except GeneratorExit:
         stop_event.set()
+
 
 @app.route('/<stream_name>/video_feed')
 def video_feed(stream_name):
