@@ -1,3 +1,4 @@
 flask
 opencv-python
 werkzeug
+# You should also get a WSGI server like gunicorn
