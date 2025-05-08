@@ -19,68 +19,118 @@ def load_metadata(stream_name):
     try:
         with open(metadata_path, 'r', encoding='utf-8') as file:
             return json.load(file)
-    except (FileNotFoundError, json.JSONDecodeError):
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        print(f"Error loading metadata for {stream_name}: {e}")
         return None
 
 def get_video_queue(stream_name):
     video_dir = os.path.join(STREAMS_DIR, stream_name, 'videos')
     history_dir = os.path.join(STREAMS_DIR, stream_name, 'history')
-    videos = sorted([f for f in os.listdir(video_dir) if f.endswith('.mp4')])
-    history = set(os.listdir(history_dir))
+    
+    try:
+        videos = sorted([f for f in os.listdir(video_dir) if f.endswith('.mp4')])
+        history = set(os.listdir(history_dir))
+    except FileNotFoundError as e:
+        print(f"Error accessing video or history directories for {stream_name}: {e}")
+        return []
+    
     return [v for v in videos if v not in history]
+
+def resize_frame_with_aspect_ratio(frame, target_width=640, target_height=480):
+    (h, w) = frame.shape[:2]
+    
+    # Calculate the aspect ratio
+    aspect_ratio = w / h
+    
+    # Calculate the new dimensions
+    if w > h:
+        new_w = target_width
+        new_h = int(target_width / aspect_ratio)
+    else:
+        new_h = target_height
+        new_w = int(target_height * aspect_ratio)
+    
+    # Resize the frame while maintaining the aspect ratio
+    resized_frame = cv2.resize(frame, (new_w, new_h))
+    return resized_frame
 
 def frame_stream(video_path, stop_event):
     cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        print(f"Error: Could not open video file {video_path}")
+        return
+    
     fps = cap.get(cv2.CAP_PROP_FPS)
     frame_interval = 1.0 / fps if fps > 0 else 1.0 / 30
 
     while cap.isOpened() and not stop_event.is_set():
         ret, frame = cap.read()
         if not ret:
+            print(f"Error reading frame from {video_path}")
             break
+        
+        # Resize the frame while keeping the aspect ratio
+        frame = resize_frame_with_aspect_ratio(frame)
+
         _, jpeg = cv2.imencode('.jpg', frame)
         if not _:
             continue
+
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
         time.sleep(frame_interval)
+    
     cap.release()
 
 def generate_mjpeg_stream(stream_name):
     stop_event = threading.Event()
-    try:
-        while True:
-            video_queue = get_video_queue(stream_name)
-            if video_queue:
-                video_path = os.path.join(STREAMS_DIR, stream_name, 'videos', video_queue.pop(0))
-                for frame in frame_stream(video_path, stop_event):
-                    yield frame
-                history_dir = os.path.join(STREAMS_DIR, stream_name, 'history')
-                os.rename(video_path, os.path.join(history_dir, os.path.basename(video_path)))
-            else:
-                offline_path = os.path.join(STREAMS_DIR, stream_name, 'offline.mp4')
-                cap = cv2.VideoCapture(offline_path)
-                fps = cap.get(cv2.CAP_PROP_FPS)
-                frame_interval = 1.0 / fps if fps > 0 else 1.0 / 30
+    while True:
+        video_queue = get_video_queue(stream_name)
+        
+        # Switch to new video when available
+        if video_queue:
+            video_path = os.path.join(STREAMS_DIR, stream_name, 'videos', video_queue.pop(0))
+            print(f"Switching to video: {video_path}")
+            for frame in frame_stream(video_path, stop_event):
+                yield frame
+            history_dir = os.path.join(STREAMS_DIR, stream_name, 'history')
+            os.rename(video_path, os.path.join(history_dir, os.path.basename(video_path)))
+        else:
+            offline_path = os.path.join(STREAMS_DIR, stream_name, 'offline.mp4')
+            if not os.path.exists(offline_path):
+                print("Error: offline.mp4 not found!")
+                break
+            
+            cap = cv2.VideoCapture(offline_path)
+            if not cap.isOpened():
+                print(f"Error: Could not open offline video {offline_path}")
+                break
+            
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            frame_interval = 1.0 / fps if fps > 0 else 1.0 / 30
 
-                while cap.isOpened():
-                    if get_video_queue(stream_name):
-                        break  # Exit offline early if a new video appears
+            while cap.isOpened():
+                if get_video_queue(stream_name):  # Check for new videos
+                    print("Switching to a new video!")
+                    break  # Exit offline if new video appears
 
-                    ret, frame = cap.read()
-                    if not ret:
-                        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)  # Loop offline.mp4
-                        continue
-                    _, jpeg = cv2.imencode('.jpg', frame)
-                    if not _:
-                        continue
-                    yield (b'--frame\r\n'
-                           b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
-                    time.sleep(frame_interval)
-                cap.release()
-    except GeneratorExit:
-        stop_event.set()
+                ret, frame = cap.read()
+                if not ret:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)  # Loop offline.mp4
+                    continue
+                
+                # Resize the frame while keeping the aspect ratio
+                frame = resize_frame_with_aspect_ratio(frame)
 
+                _, jpeg = cv2.imencode('.jpg', frame)
+                if not _:
+                    continue
+                
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
+                time.sleep(frame_interval)
+
+            cap.release()
 
 @app.route('/<stream_name>/video_feed')
 def video_feed(stream_name):
