@@ -11,9 +11,6 @@ app = Flask(__name__)
 STREAMS_DIR = './streams'
 UPLOAD_PASSWORD = os.getenv('UPLOAD_PASSWORD')
 
-if not UPLOAD_PASSWORD:
-    print("WARNING: UPLOAD_PASSWORD is not set. File uploads are disabled.")
-
 def load_metadata(stream_name):
     metadata_path = os.path.join(STREAMS_DIR, stream_name, 'metadata.json')
     try:
@@ -158,15 +155,31 @@ def index():
 
 @app.route('/<stream_name>/upload', methods=['GET', 'POST'])
 def upload(stream_name):
-    if not UPLOAD_PASSWORD:
-        return "UPLOAD_PASSWORD environment variable is not set. Uploads are disabled.", 403
-
     videos_dir = os.path.join(STREAMS_DIR, stream_name, 'videos')
     os.makedirs(videos_dir, exist_ok=True)
 
+    # Get metadata and any stream-specific env var password names
+    stream_metadata = load_metadata(stream_name)
+    extra_passwords = []
+    env_passwords_defined = False
+
+    if stream_metadata:
+        env_names = stream_metadata.get("upload_password_envs", [])
+        if isinstance(env_names, str):
+            env_names = [env_names]
+        for env_name in env_names:
+            env_value = os.getenv(env_name)
+            if env_value:
+                extra_passwords.append(env_value)
+                env_passwords_defined = True
+
+    # If neither global password nor any env passwords are defined, block upload
+    if not UPLOAD_PASSWORD and not env_passwords_defined:
+        return "No upload password is configured for this stream or globally.", 403
+
     if request.method == 'POST':
         password = request.form.get('password')
-        if password != UPLOAD_PASSWORD:
+        if password != UPLOAD_PASSWORD and password not in extra_passwords:
             return "Invalid password!", 403
 
         file = request.files.get('file')
