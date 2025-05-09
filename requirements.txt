@@ -1,7 +1,4 @@
 flask
 opencv-python
 werkzeug
-gevent>=1.4
-gunicorn
-
-# gunicorn app:app --bind 0.0.0.0:5000 --worker-class gevent --timeout 0
+# Use a WSGI server like gunicorn in production
